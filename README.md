@@ -1,0 +1,2 @@
+# nwbot
+Discord bot
