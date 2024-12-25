@@ -1,4 +1,3 @@
-# main.py
 import os
 import asyncio
 import random
@@ -7,7 +6,8 @@ import discord
 import yt_dlp
 from dotenv import load_dotenv
 
-from modules.music import play_song, play_next_in_queue
+from modules.music import play_song, fetch_track_info, is_url
+from keep_alive import keep_alive
 
 def run_bot():
     load_dotenv()
@@ -66,39 +66,64 @@ def run_bot():
         # Commande ?play
         #
         if message.content.startswith("?play"):
-            print(f"Guild {message.guild.id} - Playing {current_track[message.guild.id]}")
             if not message.author.voice or not message.author.voice.channel:
                 await message.channel.send("Rejoins un salon vocal pour jouer de la musique.")
                 return
 
-            # Extraire la "query"
             parts = message.content.split(maxsplit=1)
             if len(parts) < 2:
-                await message.channel.send("Utilisation : `?play <URL ou recherche>`")
+                await message.channel.send("Utilisation : **?play <URL ou recherche>**")
                 return
-            query = parts[1]  # peut être "rick astley never gonna give you up" ou un lien
+            query = parts[1]
 
             # Se connecter au salon si pas déjà fait
-            if voice_clients[message.guild.id] is None or not voice_clients[message.guild.id].is_connected():
+            if (voice_clients[message.guild.id] is None
+                or not voice_clients[message.guild.id].is_connected()):
                 try:
                     voice_client = await message.author.voice.channel.connect()
                     voice_clients[message.guild.id] = voice_client
+                    # On peut stocker ytdl et ffmpeg_options dans le voice_client si besoin
+                    voice_client.ytdl = ytdl
+                    voice_client.ffmpeg_options = ffmpeg_options
                 except Exception as e:
                     print(e)
                     return
 
             vc = voice_clients[message.guild.id]
+
+            # Récupère le { "title": ..., "source": ..., "url": ... }
+            track_info = await fetch_track_info(query, ytdl)
+            if not track_info:
+                return await message.channel.send("Aucun résultat trouvé ou erreur yt-dlp.")
+
             if vc.is_playing():
-                # Ajouter à la queue
-                queues[message.guild.id].append(query)
+                # Ajouter en queue
+                queues[message.guild.id].append(track_info)
                 await message.add_reaction("➕")
+                if is_url(query):
+                    await message.channel.send(f"Prochaine lecture : **{played_title}**")
+                else:
+                    await message.channel.send(f"Prochaine lecture : **[{track_info['title']}]({track_info['url']})**")
             else:
                 # Jouer immédiatement
-                title_played = await play_song(message.guild.id, query, client, queues, voice_clients, ytdl, ffmpeg_options)
-                if title_played:
-                    current_track[message.guild.id] = title_played
+                played_title = await play_song(
+                    guild_id=message.guild.id,
+                    track_info=track_info,
+                    client=client,
+                    queues=queues,
+                    voice_clients=voice_clients,
+                    current_track=current_track,
+                    ffmpeg_options=ffmpeg_options
+                )
+                if played_title:
                     await message.add_reaction("▶️")
-                    await message.channel.send(f"Lecture : **{title_played}**")
+                    if is_url(query):
+                        await message.channel.send(f"Lecture : **{played_title}**")
+                    else:
+                        await message.channel.send(f"Lecture : **[{track_info['title']}]({track_info['url']})**")
+                else:
+                    await message.add_reaction("❌")
+
 
         #
         # Commande ?pause
@@ -122,17 +147,26 @@ def run_bot():
         # Commande ?queue
         #
         elif message.content.startswith("?queue"):
-            if not queues[message.guild.id]:
-                if current_track[message.guild.id]:
-                    await message.channel.send(f"**En cours de lecture :** {current_track[message.guild.id]} \n\nLa file d'attente est vide.")
+            # Afficher la musique en cours, puis la liste des titres en attente
+            current = current_track.get(message.guild.id)
+            if current:
+                if queues[message.guild.id]:
+                    # Construit la liste des prochains morceaux
+                    queue_list = []
+                    for i, track in enumerate(queues[message.guild.id], start=1):
+                        queue_list.append(f"{i}. [{track['title']}](<{track['url']}>)")
+                    queue_str = "\n".join(queue_list)
+
+                    await message.channel.send(
+                        f"En cours : **[{current['title']}]({current['url']})**\n\n**File d'attente :**\n{queue_str}"
+                    )
+
                 else:
-                    await message.channel.send("La file d'attente est vide.")
+                    await message.channel.send(
+                        f"En cours : **[{current['title']}]({current['url']})**\n\nLa file d'attente est vide."
+                    )
             else:
-                queue_list = []
-                for i, url in enumerate(queues[message.guild.id], start=1):
-                    queue_list.append(f"{i}. {url}")
-                queue_str = "\n".join(queue_list)
-                await message.channel.send(f"**File d'attente :**\n{queue_str}")
+                await message.channel.send("Aucune musique en cours et la file est vide.")
 
         #
         # Commande ?stop
@@ -179,3 +213,4 @@ def run_bot():
                 await message.add_reaction("🤨")
 
     client.run(TOKEN)
+    
